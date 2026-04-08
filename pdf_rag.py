@@ -4,7 +4,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_core.prompts import PromptTemplate
 
 # 1. Load LLM
-llm = OllamaLLM(model="gemma3:1b")  # use llama3 later
+llm = OllamaLLM(model="gemma3:1b")
 
 # 2. Load PDF
 loader = PyPDFLoader("infosys.pdf")
