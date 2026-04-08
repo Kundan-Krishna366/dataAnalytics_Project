@@ -30,6 +30,7 @@ db = FAISS.from_documents(docs, embeddings)
 # 6. Retriever
 retriever = db.as_retriever()
 
+
 # 7. Prompt
 prompt = PromptTemplate(
     template="""
