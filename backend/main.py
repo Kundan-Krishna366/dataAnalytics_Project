@@ -2,6 +2,7 @@ import re
 import os
 import shutil
 import uuid
+import base64
 import numpy as np
 import pandas as pd
 import logging
@@ -10,10 +11,17 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
+from groq import Groq
 from langchain_groq import ChatGroq
-from langchain_community.document_loaders import PyPDFLoader
+from langchain_community.document_loaders import (
+    PyPDFLoader, 
+    Docx2txtLoader, 
+    CSVLoader, 
+    UnstructuredExcelLoader,
+    TextLoader
+)
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_core.prompts import PromptTemplate
+from langchain_core.documents import Document
 from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
 
@@ -65,45 +73,90 @@ def extract_analytics_logic(documents):
     for n in raw_numbers:
         try:
             val = float(n.replace(',', ''))
-            if 2000 <= val <= 2030: continue
-            if val < 20: continue 
-            if 1000000000 <= val <= 9999999999: continue
+            if 2000 <= val <= 2030: continue 
+            if val < 5: continue              
             cleaned_values.append(val)
         except:
             continue
 
-    if len(cleaned_values) < 5:
-        years = sorted(set(re.findall(r"\b20\d{2}\b", text)))
+    years = sorted(set(re.findall(r"\b20\d{2}\b", text)))
+    
+    if len(cleaned_values) < 3:
         return None, years, text
         
     df = pd.DataFrame(cleaned_values, columns=["values"])
-    if len(df) > 15:
-        df = df[df["values"] < df["values"].quantile(0.98)]
-    
-    years = sorted(set(re.findall(r"\b20\d{2}\b", text)))
     return df, years, text
 
+def groq_vision_ocr(image_path):
+    with open(image_path, "rb") as image_file:
+        encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
+
+    client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+    
+    # Using 'llama-3.2-11b-vision-preview' as it is currently the most consistent vision ID
+    # If this fails, the fall-back is 'llama-3.2-90b-vision-preview'
+    completion = client.chat.completions.create(
+        model="llama-3.2-11b-vision-preview", 
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Extract all text and numerical data from this image. Format it clearly."},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{encoded_string}"}
+                    }
+                ]
+            }
+        ],
+        temperature=0.1,
+    )
+    return completion.choices[0].message.content
+
 @app.post("/upload")
-async def upload_pdf(file: UploadFile = File(...)):
+async def upload_file(file: UploadFile = File(...)):
     session_id = uuid.uuid4().hex[:8]
-    temp_path = f"temp_{session_id}.pdf"
+    extension = os.path.splitext(file.filename)[-1].lower()
+    temp_path = f"temp_{session_id}{extension}"
     
     with open(temp_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
     
     try:
-        loader = PyPDFLoader(temp_path)
-        documents = loader.load()
+        if extension == ".pdf":
+            loader = PyPDFLoader(temp_path)
+            documents = loader.load()
+        elif extension == ".docx":
+            loader = Docx2txtLoader(temp_path)
+            documents = loader.load()
+        elif extension == ".csv":
+            loader = CSVLoader(temp_path)
+            documents = loader.load()
+        elif extension == ".txt":
+            loader = TextLoader(temp_path, encoding='utf-8')
+            documents = loader.load()
+        elif extension in [".xlsx", ".xls"]:
+            loader = UnstructuredExcelLoader(temp_path, mode="elements")
+            documents = loader.load()
+        elif extension in [".jpg", ".jpeg", ".png"]:
+            ocr_text = groq_vision_ocr(temp_path)
+            documents = [Document(page_content=ocr_text, metadata={"source": file.filename})]
+        else:
+            raise HTTPException(status_code=400, detail="Unsupported format")
+
         splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
         docs = splitter.split_documents(documents)
         db = FAISS.from_documents(docs, embeddings)
         
         storage["documents"] = documents
         storage["db"] = db
-        storage["retriever"] = db.as_retriever(search_kwargs={"k": 10})
+        storage["retriever"] = db.as_retriever(search_kwargs={"k": 7})
         
         df, years, _ = extract_analytics_logic(documents)
         
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
         stats = {
             "has_analytics": df is not None,
             "total_points": len(df) if df is not None else 0,
@@ -116,31 +169,32 @@ async def upload_pdf(file: UploadFile = File(...)):
         return {"status": "success", "filename": file.filename, "stats": stats}
     
     except Exception as e:
-        logging.error(f"Ingestion Failure: {str(e)}")
-        raise HTTPException(status_code=500, detail="Failed to process PDF")
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        logging.error(f"Error: {str(e)}")
+        # Send the actual error message back to help debug
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/chat")
 async def chat(question: str = Form(...)):
     if not storage["retriever"]:
-        raise HTTPException(status_code=400, detail="No document indexed")
+        raise HTTPException(status_code=400, detail="No document")
 
-    analytics_keywords = ["average", "mean", "max", "min", "stats", "total", "count", "highest", "lowest"]
-    is_asking_for_stats = any(k in question.lower() for k in analytics_keywords)
+    keywords = ["average", "mean", "max", "min", "stats", "trend", "highest", "lowest"]
+    is_asking_stats = any(k in question.lower() for k in keywords)
     
     df, years, _ = extract_analytics_logic(storage["documents"])
     
-    if is_asking_for_stats and df is not None:
+    if is_asking_stats and df is not None:
         vals = df["values"].values
-        stats_summary = (f"Numerical Summary: Data Points={len(vals)}, "
-                         f"Mean={np.mean(vals):.2f}, Peak={np.max(vals):.2f}, "
-                         f"Min={np.min(vals):.2f}, Years Detected={years}")
-        
-        prompt = f"{STRICT_SYSTEM_PROMPT}\n\nSystem Stats: {stats_summary}\nUser Question: {question}"
+        summary = (f"Numerical Summary: Points={len(vals)}, "
+                   f"Mean={np.mean(vals):.2f}, Peak={np.max(vals):.2f}")
+        prompt = f"{STRICT_SYSTEM_PROMPT}\n\nStats: {summary}\nQuestion: {question}"
         response = llm.invoke(prompt)
     else:
         docs = storage["retriever"].invoke(question)
         context = "\n\n---\n".join([d.page_content for d in docs])
-        prompt = f"{STRICT_SYSTEM_PROMPT}\n\nCONTEXT FROM PDF:\n{context}\n\nUSER QUESTION: {question}"
+        prompt = f"{STRICT_SYSTEM_PROMPT}\n\nCONTEXT:\n{context}\n\nQUESTION: {question}"
         response = llm.invoke(prompt)
 
     return {"answer": response.content}

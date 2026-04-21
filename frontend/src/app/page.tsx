@@ -33,13 +33,18 @@ export default function ProductionDashboard() {
         body: fd 
       });
       const data = await res.json();
-      setStats(data.stats);
-      setChat(prev => [...prev, { 
-        role: 'assistant', 
-        content: `System: ${selectedFile.name} indexed. Neural engine ready for queries.` 
-      }]);
+      
+      if (res.ok) {
+        setStats(data.stats);
+        setChat(prev => [...prev, { 
+          role: 'assistant', 
+          content: `System: ${selectedFile.name} indexed successfully. Neural engine ready for multi-format queries.` 
+        }]);
+      } else {
+        throw new Error(data.detail || "Upload failed");
+      }
     } catch (err) {
-      console.error("Link Error");
+      setChat(prev => [...prev, { role: 'assistant', content: "Error: Failed to process document. Ensure backend is running." }]);
     } finally {
       setLoading(false);
     }
@@ -187,7 +192,7 @@ export default function ProductionDashboard() {
                 <input
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
-                  placeholder={loading ? "Analyzing document..." : "Ask your document anything..."}
+                  placeholder={loading ? "Analyzing data source..." : "Ask anything about your document or image..."}
                   className="flex-1 bg-transparent text-slate-100 placeholder:text-slate-600 text-lg outline-none"
                   disabled={loading}
                 />
@@ -195,8 +200,12 @@ export default function ProductionDashboard() {
               <div className="flex items-center justify-between border-t border-white/5 pt-4">
                 <label className="flex items-center gap-2 text-xs text-slate-400 bg-white/[0.04] border border-white/5 rounded-xl px-4 py-2 cursor-pointer hover:bg-teal-400/10 hover:text-teal-400 transition">
                   <Paperclip size={14} />
-                  <span className="font-semibold uppercase tracking-widest">{file ? file.name : "Attach PDF"}</span>
-                  <input ref={fileInputRef} type="file" className="hidden" accept=".pdf"
+                  <span className="font-semibold uppercase tracking-widest">{file ? file.name : "Attach FILE / IMAGE"}</span>
+                  <input 
+                    ref={fileInputRef} 
+                    type="file" 
+                    className="hidden" 
+                    accept=".pdf,.docx,.csv,.xlsx,.xls,.txt,.jpg,.jpeg,.png"
                     onChange={(e) => {
                       const selected = e.target.files?.[0];
                       if (selected) {

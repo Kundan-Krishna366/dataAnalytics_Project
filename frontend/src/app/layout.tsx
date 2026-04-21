@@ -2,12 +2,12 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "PDF RAG",
+  title: "DOCS RAG",
   description: "AI-Powered PDF RAG and Analytics",
 };
 
 export default function RootLayout({
-  children,
+  children,                                       
 }: Readonly<{
   children: React.ReactNode;
 }>) {
