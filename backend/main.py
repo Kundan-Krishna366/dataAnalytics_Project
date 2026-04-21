@@ -2,7 +2,6 @@ import re
 import os
 import shutil
 import uuid
-import base64
 import numpy as np
 import pandas as pd
 import logging
@@ -10,8 +9,6 @@ from typing import List, Optional, Dict, Any
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
-
-from groq import Groq
 from langchain_groq import ChatGroq
 from langchain_community.document_loaders import (
     PyPDFLoader, 
@@ -87,32 +84,6 @@ def extract_analytics_logic(documents):
     df = pd.DataFrame(cleaned_values, columns=["values"])
     return df, years, text
 
-def groq_vision_ocr(image_path):
-    with open(image_path, "rb") as image_file:
-        encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
-
-    client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-    
-    # Using 'llama-3.2-11b-vision-preview' as it is currently the most consistent vision ID
-    # If this fails, the fall-back is 'llama-3.2-90b-vision-preview'
-    completion = client.chat.completions.create(
-        model="llama-3.2-11b-vision-preview", 
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "Extract all text and numerical data from this image. Format it clearly."},
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{encoded_string}"}
-                    }
-                ]
-            }
-        ],
-        temperature=0.1,
-    )
-    return completion.choices[0].message.content
-
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...)):
     session_id = uuid.uuid4().hex[:8]
@@ -123,27 +94,22 @@ async def upload_file(file: UploadFile = File(...)):
         shutil.copyfileobj(file.file, buffer)
     
     try:
+        # File type routing
         if extension == ".pdf":
             loader = PyPDFLoader(temp_path)
-            documents = loader.load()
         elif extension == ".docx":
             loader = Docx2txtLoader(temp_path)
-            documents = loader.load()
         elif extension == ".csv":
             loader = CSVLoader(temp_path)
-            documents = loader.load()
         elif extension == ".txt":
             loader = TextLoader(temp_path, encoding='utf-8')
-            documents = loader.load()
         elif extension in [".xlsx", ".xls"]:
             loader = UnstructuredExcelLoader(temp_path, mode="elements")
-            documents = loader.load()
-        elif extension in [".jpg", ".jpeg", ".png"]:
-            ocr_text = groq_vision_ocr(temp_path)
-            documents = [Document(page_content=ocr_text, metadata={"source": file.filename})]
         else:
-            raise HTTPException(status_code=400, detail="Unsupported format")
+            raise HTTPException(status_code=400, detail=f"Unsupported format: {extension}")
 
+        documents = loader.load()
+        
         splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
         docs = splitter.split_documents(documents)
         db = FAISS.from_documents(docs, embeddings)
@@ -171,14 +137,13 @@ async def upload_file(file: UploadFile = File(...)):
     except Exception as e:
         if os.path.exists(temp_path):
             os.remove(temp_path)
-        logging.error(f"Error: {str(e)}")
-        # Send the actual error message back to help debug
+        logging.error(f"Upload Error: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/chat")
 async def chat(question: str = Form(...)):
     if not storage["retriever"]:
-        raise HTTPException(status_code=400, detail="No document")
+        raise HTTPException(status_code=400, detail="No document indexed")
 
     keywords = ["average", "mean", "max", "min", "stats", "trend", "highest", "lowest"]
     is_asking_stats = any(k in question.lower() for k in keywords)
